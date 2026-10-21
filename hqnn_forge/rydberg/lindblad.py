@@ -194,6 +194,11 @@ def evolve(
     n_steps: int | None = None,
 ) -> torch.Tensor:
     """
+    Gradient handling (#505): when gradient tracking is enabled and the
+    Hamiltonian requires gradients, evolution uses ``torch.linalg.matrix_exp``
+    to avoid incorrect eigenvector gradients at degenerate eigenvalues.
+    Otherwise, it uses ``torch.linalg.eigh``.
+
     The state ``ρ(t)`` of an array that starts with every atom in ``|g⟩``.
 
     Solves, for one or a batch of time-independent Hamiltonians::
@@ -328,18 +333,28 @@ def evolve(
             "the level spacings of the Hamiltonian."
         )
 
-    # H = V E V†: energies[..., m] = E_m, vectors[..., k, m] = V_km.
-    energies, vectors = torch.linalg.eigh(h)
+    use_matrix_exp = torch.is_grad_enabled() and h.requires_grad
 
-    if gamma == 0 or steps is None:  # no steps only without dephasing, see above
-        # ψ_k(t) = Σ_m V_km e^(−i E_m t) conj(V_0m); row 0 of V is ⟨g…g|m⟩.
+    if gamma == 0:
+        if use_matrix_exp:
+            # Avoid eigenvector gradients at degenerate eigenvalues (#505).
+            propagator = torch.linalg.matrix_exp(-1j * h * t)
+            psi = propagator[..., :, 0]
+            return psi.unsqueeze(-1) @ psi.conj().unsqueeze(-2)
+
+        energies, vectors = torch.linalg.eigh(h)
         amplitudes = torch.exp(-1j * energies * t) * vectors[..., 0, :].conj()
         psi = vectors @ amplitudes[..., :, None]
         return psi @ psi.mH
 
     dt = t / steps
-    # U(dt) = V e^(−i E dt) V†: column m of V scaled by its phase, times V†.
-    propagator = (vectors * torch.exp(-1j * energies * dt)[..., None, :]) @ vectors.mH
+    if use_matrix_exp:
+        propagator = torch.linalg.matrix_exp(-1j * h * dt)
+    else:
+        energies, vectors = torch.linalg.eigh(h)
+        propagator = (
+            vectors * torch.exp(-1j * energies * dt)[..., None, :]
+        ) @ vectors.mH
     # d_H(a, b) = Σ_i (a_i − b_i)² = |a| + |b| − 2 a·b, the number of atoms on
     # which a and b differ; small integers, exact in float64.
     bits = _bits(n, h.device)

@@ -648,6 +648,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a dataset where it was what lifted the rank to `n_atoms`, `PCANormalizer.fit` now raises
   `centred data has rank r < n_components` and the run stops, where it used to take the
   rounding noise as an input (#580, #600)
+- `evolve`: fixed incorrect gradients at degenerate eigenvalues by using `torch.linalg.matrix_exp` when gradients are required (#505).
+
 
 ### Removed
 - `PCANormalizer`'s `copy` option, which never had an effect (#77)

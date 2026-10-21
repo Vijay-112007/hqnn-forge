@@ -829,6 +829,42 @@ class TestGradients:
     path.  At a degenerate spectrum ``eigh`` returns a wrong gradient (#505);
     the case here is not degenerate.
     """
+    @pytest.mark.parametrize(
+        ("gamma","n_steps","expected_gradient"),
+        [
+            (0.0, None, -0.02279),
+            (0.8, 6, -0.01892),
+        ],
+
+    )
+    def test_degenerate_spectrum_gradient_matches_reference(
+        self,
+        gamma: float,
+        n_steps: int|None,
+        expected_gradient: float,
+    ) -> None:
+        """Gradients remains correct when equal detunings product degeneracy"""
+        register = AtomRegister.chain(2,1.0)
+        delta = torch.tensor([0.4, 0.4], dtype=F64, requires_grad=True)
+        h = rydberg_hamiltonian(
+            register,
+            2.0,
+            delta,
+            c6 = 1.3,
+            interactions = False,
+            )
+        output = readout(
+            evolve(h,0.8,gamma = gamma,n_steps = n_steps)
+            ).sum()
+        gradient = torch.autograd.grad(output,delta)[0]
+
+        expected = torch.full_like(delta,expected_gradient)
+        torch.testing.assert_close(
+            gradient,
+            expected,
+            rtol=0,
+            atol = 5e-5,
+        )
 
     @pytest.mark.parametrize(("gamma", "n_steps"), [(0.0, None), (0.8, 6)])
     def test_gradient_of_the_features_matches_finite_differences(
@@ -844,6 +880,41 @@ class TestGradients:
         delta = torch.tensor([0.4, 1.1], dtype=F64, requires_grad=True)
         assert torch.autograd.gradcheck(features, (delta,), eps=1e-6, atol=1e-7)
 
+    # Test agreement between gradient-tracked and non-gradient paths.
+    @pytest.mark.parametrize(("gamma","n_steps"),[(0.0, None),(0.8, 6)])
+    def test_gradient_and_non_gradient_paths_agree(
+        self,
+        gamma: float,
+        n_steps : int|None
+    ) -> None:
+
+        """Both propogation paths produce equivalent forward results"""
+        register = AtomRegister.chain(2,1.0)
+        delta = torch.tensor([0.4,0.4],dtype = F64,requires_grad = True)
+        h = rydberg_hamiltonian(
+            register,
+            2.0,
+            delta,
+            c6=1.3,
+            interactions = False
+        )
+        rho_with_grad = evolve(h,0.8,gamma = gamma,n_steps = n_steps)
+        features_with_grad = readout(rho_with_grad)
+        with torch.no_grad():
+            rho_without_grad = evolve(h.detach(),0.8,gamma = gamma,n_steps = n_steps)
+            features_without_grad = readout(rho_without_grad)
+        torch.testing.assert_close(
+            rho_with_grad.detach(),
+            rho_without_grad,
+            rtol = 1e-10,
+            atol = 1e-12
+        )
+        torch.testing.assert_close(
+            features_with_grad.detach(),
+            features_without_grad,
+            rtol = 1e-10,
+            atol = 1e-12,
+        )
 
 class TestValidation:
     H = rydberg_hamiltonian(AtomRegister.chain(2, 1.0), 2.0, [0.1, 0.2], c6=1.0)
