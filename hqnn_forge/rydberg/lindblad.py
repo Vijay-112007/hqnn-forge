@@ -194,11 +194,6 @@ def evolve(
     n_steps: int | None = None,
 ) -> torch.Tensor:
     """
-    Gradient handling (#505): when gradient tracking is enabled and the
-    Hamiltonian requires gradients, evolution uses ``torch.linalg.matrix_exp``
-    to avoid incorrect eigenvector gradients at degenerate eigenvalues.
-    Otherwise, it uses ``torch.linalg.eigh``.
-
     The state ``ρ(t)`` of an array that starts with every atom in ``|g⟩``.
 
     Solves, for one or a batch of time-independent Hamiltonians::
@@ -209,9 +204,11 @@ def evolve(
     collapse operators ``L_i = √γ n_i``.  The module docstring derives every
     formula used here, with the sign and ordering conventions.
 
-    * ``gamma = 0``: ``ρ(t) = ψψ†`` with ``ψ = e^(−iHt) |g…g⟩``, exact and
-      without time stepping. Without gradients, this uses one eigendecomposition
-      per sample; with reverse-mode gradients, it uses ``torch.linalg.matrix_exp``.
+    * ``gamma = 0``: ``ρ(t) = ψψ†`` with ``ψ = e^(−iHt) |g…g⟩``, with
+      no time stepping. Without gradients, this uses one eigendecomposition
+      per sample and is exact up to floating-point rounding. With reverse-mode
+      gradients, it uses ``torch.linalg.matrix_exp``; its rounding error can
+      grow with ``‖H·t‖`` (#674).
     * ``gamma > 0``: ``n_steps`` steps of ``dt = t / n_steps`` of the
       symmetric (Strang) splitting
       ``e^(𝓛_D dt/2) · e^(𝓛_H dt) · e^(𝓛_D dt/2)``. The unitary step is
@@ -219,8 +216,10 @@ def evolve(
       computed from an eigendecomposition, while with reverse-mode gradients
       it uses ``torch.linalg.matrix_exp``. The dissipative step multiplies
       ``ρ_ab`` by ``exp(−γ τ d_H(a, b) / 2)``, ``d_H`` the Hamming distance of
-      the basis states ``a`` and ``b``. Both are exact; the splitting has a
-      **global error of second order in ``dt``**.
+            the basis states ``a`` and ``b``. The dissipative step is exact up to
+      floating-point rounding; the splitting has a **global error of second
+      order in ``dt``**. The unitary step is exact up to floating-point
+      rounding on either computational path.
 
     Parameters
     ----------
@@ -242,15 +241,21 @@ def evolve(
         ``gamma > 0`` and without a default: the step that is accurate enough
         depends on γ and on the level spacings of ``H`` (the interaction, in
         the blockade), which this function does not guess.  Not used when
-        ``gamma = 0``, where the result is exact.
+        ``gamma = 0``, where no time stepping is needed. Without gradients,
+        the result is exact up to floating-point rounding; with gradients,
+        ``matrix_exp`` introduces rounding error that can grow with ``‖H·t‖``
+        (#674).
 
     Returns
     -------
     torch.Tensor
         ``ρ(t)``, ``complex128``, with the shape and device of
         ``hamiltonian``.  Entry ``[..., a, b]`` is ``⟨a|ρ|b⟩``.  Trace 1,
-        Hermitian and positive semidefinite up to rounding, at any step size;
-        the rounding error of the trace grows by a few ``1e-16`` per step.
+        Hermitian and positive semidefinite up to floating-point rounding.
+        Trace preservation is subject to rounding: on the ``eigh`` path, the
+        trace error is typically a few ``1e-16`` per step; on the
+        gradient-enabled ``matrix_exp`` path, it can be larger and grow with
+        ``‖H·t‖`` (#674).
 
     Raises
     ------
@@ -277,8 +282,9 @@ def evolve(
       against the inverse of the largest level spacing of ``H``.
     * **Cost.** Without gradients, one eigendecomposition per sample, then two
       ``2^N × 2^N`` matrix products per step and sample. When reverse-mode
-      gradients are required, one ``matrix_exp`` per sample is used instead,
-      which is noticeably slower.
+      gradients are required, one ``matrix_exp`` per sample is used instead.
+      This is about 3.6× slower for a batch of 32 at ``MAX_ATOMS`` and about
+      4.5× slower on a 10-atom chain.
     * **Gradients.** Operations are differentiable and none is in place on a
       tensor carrying a gradient, so gradients reach the tensors
       ``hamiltonian`` was built from. When gradient tracking is enabled and
@@ -287,7 +293,6 @@ def evolve(
       degenerate eigenvalues (#505). Otherwise it uses ``torch.linalg.eigh``.
       Forward-mode AD via ``torch.func.jacfwd`` or ``torch.func.jvp`` still
       takes the ``eigh`` path and has the known degeneracy limitation (#674).
-      ``matrix_exp`` may be slower than the eigendecomposition path.
     * **Time-dependent pulses** are out of scope.  A piecewise-constant one
       would repeat the loop below per segment, starting from the previous
       segment's state.
@@ -338,14 +343,16 @@ def evolve(
     h = (h + h.mH) / 2
     use_matrix_exp = torch.is_grad_enabled() and h.requires_grad
 
-    if gamma == 0:
+    if gamma == 0 or steps is None:  # no steps only without dephasing, see above
         if use_matrix_exp:
             # Avoid eigenvector gradients at degenerate eigenvalues (#505).
             propagator = torch.linalg.matrix_exp(-1j * h * t)
             psi = propagator[..., :, 0]
             return psi.unsqueeze(-1) @ psi.conj().unsqueeze(-2)
 
+        # H = V E V†: the columns of V are the energy eigenvectors.
         energies, vectors = torch.linalg.eigh(h)
+        # ψ_k(t) = Σ_m V_km e^(−i E_m t) conj(V_0m); evolve |g…g⟩.
         amplitudes = torch.exp(-1j * energies * t) * vectors[..., 0, :].conj()
         psi = vectors @ amplitudes[..., :, None]
         return psi @ psi.mH
@@ -354,6 +361,7 @@ def evolve(
     if use_matrix_exp:
         propagator = torch.linalg.matrix_exp(-1j * h * dt)
     else:
+        # U(dt) = V e^(−i E dt) V†: the exact unitary step from the eigendecomposition.
         energies, vectors = torch.linalg.eigh(h)
         propagator = (vectors * torch.exp(-1j * energies * dt)[..., None, :]) @ vectors.mH
     # d_H(a, b) = Σ_i (a_i − b_i)² = |a| + |b| − 2 a·b, the number of atoms on

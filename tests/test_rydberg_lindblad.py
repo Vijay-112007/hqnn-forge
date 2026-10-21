@@ -862,20 +862,27 @@ class TestGradients:
         delta = torch.tensor([0.4, 1.1], dtype=F64, requires_grad=True)
         assert torch.autograd.gradcheck(features, (delta,), eps=1e-6, atol=1e-7)
 
-    # Test agreement between gradient-tracked and non-gradient paths.
     @pytest.mark.parametrize(("gamma", "n_steps"), [(0.0, None), (0.8, 6)])
     def test_gradient_and_non_gradient_paths_agree(
-        self, gamma: float, n_steps: int | None
+        self, gamma: float, n_steps: int | None, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Both propagation paths produce equivalent forward results."""
         register = AtomRegister.chain(2, 1.0)
         delta = torch.tensor([0.4, 0.4], dtype=F64, requires_grad=True)
         h = rydberg_hamiltonian(register, 2.0, delta, c6=1.3, interactions=False)
-        rho_with_grad = evolve(h, 0.8, gamma=gamma, n_steps=n_steps)
+
+        def fail_eigh(*args: object, **kwargs: object) -> torch.Tensor:
+            raise AssertionError("gradient-enabled evolution must not call torch.linalg.eigh")
+
+        with monkeypatch.context() as m:
+            m.setattr(torch.linalg, "eigh", fail_eigh)
+            rho_with_grad = evolve(h, 0.8, gamma=gamma, n_steps=n_steps)
+
         features_with_grad = readout(rho_with_grad)
         with torch.no_grad():
             rho_without_grad = evolve(h.detach(), 0.8, gamma=gamma, n_steps=n_steps)
             features_without_grad = readout(rho_without_grad)
+
         torch.testing.assert_close(
             rho_with_grad.detach(), rho_without_grad, rtol=1e-10, atol=1e-12
         )
