@@ -209,16 +209,18 @@ def evolve(
     collapse operators ``L_i = √γ n_i``.  The module docstring derives every
     formula used here, with the sign and ordering conventions.
 
-    * ``gamma = 0``: ``ρ(t) = ψψ†`` with ``ψ = e^(−iHt) |g…g⟩``, exact, from
-      one eigendecomposition per sample and without time stepping.
+    * ``gamma = 0``: ``ρ(t) = ψψ†`` with ``ψ = e^(−iHt) |g…g⟩``, exact and
+      without time stepping. Without gradients, this uses one eigendecomposition
+      per sample; with reverse-mode gradients, it uses ``torch.linalg.matrix_exp``.
     * ``gamma > 0``: ``n_steps`` steps of ``dt = t / n_steps`` of the
       symmetric (Strang) splitting
-      ``e^(𝓛_D dt/2) · e^(𝓛_H dt) · e^(𝓛_D dt/2)``.  The unitary step is
-      ``ρ → U ρ U†`` with ``U = e^(−iH dt)`` from the same
-      eigendecomposition; the dissipative step multiplies ``ρ_ab`` by
-      ``exp(−γ τ d_H(a, b) / 2)``, ``d_H`` the Hamming distance of the basis
-      states ``a`` and ``b``.  Both are exact; the splitting has a **global
-      error of second order in ``dt``**.
+      ``e^(𝓛_D dt/2) · e^(𝓛_H dt) · e^(𝓛_D dt/2)``. The unitary step is
+      ``ρ → U ρ U†`` with ``U = e^(−iH dt)``; without gradients, ``U`` is
+      computed from an eigendecomposition, while with reverse-mode gradients
+      it uses ``torch.linalg.matrix_exp``. The dissipative step multiplies
+      ``ρ_ab`` by ``exp(−γ τ d_H(a, b) / 2)``, ``d_H`` the Hamming distance of
+      the basis states ``a`` and ``b``. Both are exact; the splitting has a
+      **global error of second order in ``dt``**.
 
     Parameters
     ----------
@@ -273,18 +275,19 @@ def evolve(
       two runs with ``n_steps`` and ``2 · n_steps`` differ by about 3/4 of
       the coarser run's error.  ``dt`` must be small against ``1/γ`` and
       against the inverse of the largest level spacing of ``H``.
-    * **Cost.**  One eigendecomposition per sample, then two
-      ``2^N × 2^N`` matrix products per step and sample.
-    * **Gradients.**  Every operation is differentiable and none is in
-      place on a tensor that carries a gradient (the only in-place write
-      sets the constant initial state), so gradients reach the tensors
-      ``hamiltonian`` was built from,
-      and they match finite differences where the spectrum of ``H`` is not
-      degenerate.  They pass through ``torch.linalg.eigh``, whose backward
-      pass holds ``1/(E_m − E_k)``: **where two eigenvalues coincide the
-      gradient is wrong without any error**, finite but not the derivative
-      (#505).  Two atoms with equal detunings and no interaction are enough.
-      Nothing here needs a gradient; the features are precomputed.
+    * **Cost.** Without gradients, one eigendecomposition per sample, then two
+      ``2^N × 2^N`` matrix products per step and sample. When reverse-mode
+      gradients are required, one ``matrix_exp`` per sample is used instead,
+      which is noticeably slower.
+    * **Gradients.** Operations are differentiable and none is in place on a
+      tensor carrying a gradient, so gradients reach the tensors
+      ``hamiltonian`` was built from. When gradient tracking is enabled and
+      ``hamiltonian`` requires gradients, ``evolve`` uses
+      ``torch.linalg.matrix_exp`` to avoid incorrect eigenvector gradients at
+      degenerate eigenvalues (#505). Otherwise it uses ``torch.linalg.eigh``.
+      Forward-mode AD via ``torch.func.jacfwd`` or ``torch.func.jvp`` still
+      takes the ``eigh`` path and has the known degeneracy limitation (#674).
+      ``matrix_exp`` may be slower than the eigendecomposition path.
     * **Time-dependent pulses** are out of scope.  A piecewise-constant one
       would repeat the loop below per segment, starting from the previous
       segment's state.
@@ -332,7 +335,7 @@ def evolve(
             "(t / n_steps)^2, and the step that is small enough depends on gamma and on "
             "the level spacings of the Hamiltonian."
         )
-
+    h = (h + h.mH) / 2
     use_matrix_exp = torch.is_grad_enabled() and h.requires_grad
 
     if gamma == 0:
@@ -352,9 +355,7 @@ def evolve(
         propagator = torch.linalg.matrix_exp(-1j * h * dt)
     else:
         energies, vectors = torch.linalg.eigh(h)
-        propagator = (
-            vectors * torch.exp(-1j * energies * dt)[..., None, :]
-        ) @ vectors.mH
+        propagator = (vectors * torch.exp(-1j * energies * dt)[..., None, :]) @ vectors.mH
     # d_H(a, b) = Σ_i (a_i − b_i)² = |a| + |b| − 2 a·b, the number of atoms on
     # which a and b differ; small integers, exact in float64.
     bits = _bits(n, h.device)
