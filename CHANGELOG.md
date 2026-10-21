@@ -652,7 +652,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   now comes from `torch.linalg.matrix_exp` instead of `eigh`; forward-mode AD
   is still affected (#674) (#505, #668)
 
-
 ### Removed
 - `PCANormalizer`'s `copy` option, which never had an effect (#77)
 - The unused `apply_restricted_init` helper (#114)

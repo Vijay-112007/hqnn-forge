@@ -54,12 +54,16 @@ elementwise multiplication, exactly, for any τ::
 * **No ordering enters.**  ``d_H`` is symmetric in the atoms, so the factor
   does not depend on which bit belongs to which atom.
 
-The unitary part
+
 ----------------
 ``H`` is constant in time.  With its eigendecomposition ``H = V E V†``
 (``E`` real and diagonal, ``V`` unitary)::
 
     U(τ) = e^(−iHτ) = V e^(−iEτ) V†,        e^(𝓛_H τ) ρ = U(τ) ρ U(τ)†
+
+When the Hamiltonian requires grad, ``evolve`` computes the same
+``e^(−iHτ)`` with ``torch.linalg.matrix_exp`` instead, whose backward
+pass has no ``1/(E_m − E_k)`` term (#505).
 
 The sign is that of the Schrödinger equation ``i dψ/dt = Hψ``.  For one
 resonant atom it gives ``ψ(t) = (cos(Ωt/2), −i sin(Ωt/2))`` in the basis
@@ -212,14 +216,13 @@ def evolve(
     * ``gamma > 0``: ``n_steps`` steps of ``dt = t / n_steps`` of the
       symmetric (Strang) splitting
       ``e^(𝓛_D dt/2) · e^(𝓛_H dt) · e^(𝓛_D dt/2)``. The unitary step is
-      ``ρ → U ρ U†`` with ``U = e^(−iH dt)``; without gradients, ``U`` is
       computed from an eigendecomposition, while with reverse-mode gradients
       it uses ``torch.linalg.matrix_exp``. The dissipative step multiplies
       ``ρ_ab`` by ``exp(−γ τ d_H(a, b) / 2)``, ``d_H`` the Hamming distance of
-            the basis states ``a`` and ``b``. The dissipative step is exact up to
+      the basis states ``a`` and ``b``. The dissipative step is exact up to
       floating-point rounding; the splitting has a **global error of second
-      order in ``dt``**. The unitary step is exact up to floating-point
-      rounding on either computational path.
+      order in ``dt``**. On the ``matrix_exp`` path, the unitary step's
+      rounding error can grow with ``‖H·dt‖`` (#674).
 
     Parameters
     ----------
