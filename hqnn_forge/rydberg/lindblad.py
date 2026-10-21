@@ -285,10 +285,12 @@ def evolve(
       the coarser run's error.  ``dt`` must be small against ``1/γ`` and
       against the inverse of the largest level spacing of ``H``.
     * **Cost.** Without gradients, one eigendecomposition per sample, then two
-      ``2^N × 2^N`` matrix products per step and sample. When reverse-mode
-      gradients are required, one ``matrix_exp`` per sample is used instead.
-      This is about 3.6× slower for a batch of 32 at ``MAX_ATOMS`` and about
-      4.5× slower on a 10-atom chain.
+        ``2^N × 2^N`` matrix products per step and sample. When reverse-mode
+        gradients are required, one ``matrix_exp`` per sample replaces the
+        eigendecomposition, and its backward pass exponentiates a matrix of
+        twice the size. A forward and backward pass then takes about 4× as long
+        as on the ``eigh`` path at 6 atoms, and about 20× as long, with about
+        4.5× the memory, at ``MAX_ATOMS`` (#674).
     * **Gradients.** Operations are differentiable and none is in place on a
       tensor carrying a gradient, so gradients reach the tensors
       ``hamiltonian`` was built from. When gradient tracking is enabled and
