@@ -54,7 +54,7 @@ elementwise multiplication, exactly, for any τ::
 * **No ordering enters.**  ``d_H`` is symmetric in the atoms, so the factor
   does not depend on which bit belongs to which atom.
 
-
+The unitary part
 ----------------
 ``H`` is constant in time.  With its eigendecomposition ``H = V E V†``
 (``E`` real and diagonal, ``V`` unitary)::
@@ -216,6 +216,7 @@ def evolve(
     * ``gamma > 0``: ``n_steps`` steps of ``dt = t / n_steps`` of the
       symmetric (Strang) splitting
       ``e^(𝓛_D dt/2) · e^(𝓛_H dt) · e^(𝓛_D dt/2)``. The unitary step is
+      ``ρ → U ρ U†`` with ``U = e^(−iH dt)``; without gradients, ``U`` is
       computed from an eigendecomposition, while with reverse-mode gradients
       it uses ``torch.linalg.matrix_exp``. The dissipative step multiplies
       ``ρ_ab`` by ``exp(−γ τ d_H(a, b) / 2)``, ``d_H`` the Hamming distance of
